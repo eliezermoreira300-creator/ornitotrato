@@ -1,0 +1,10 @@
+﻿ornitotrato.exe
+*.exe
+ornito.teste/
+extratos/
+cadastros/
+__pycache__/
+venv/
+*.pyc
+.DS_Store
+Thumbs.db
