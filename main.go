@@ -191,10 +191,4 @@ func main() {
 
             if contador > 0 {
                 wg.Wait()
-                mostrarNotificacao("Ornitotrato Automático", fmt.Sprintf("Lote de %d extrato(s) processado e importado com sucesso!", contador))
-            }
-        }
-
-        time.Sleep(3 * time.Second)
-    }
-}
+                mostrarNotific
