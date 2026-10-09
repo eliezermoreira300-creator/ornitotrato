@@ -37,30 +37,3 @@ def main() -> None:
         ('3224-7', '4.516-0', 'Conta Banco 2', '8'),
         ('3214-0', '120.308-8', 'Conta Banco 3', '3')
     ]
-    cursor.executemany("""
-        INSERT INTO bancos_contas (agencia, numero_conta, descricao_conta, conta_reduzida)
-        VALUES (?, ?, ?, ?)
-    """, bancos_iniciais)
-
-    operacoes_iniciais = [
-        ('PIX RECEBIDO', '649'),
-        ('PIX ENVIADO', '648'),
-        ('TED', '648'),
-        ('DOC', '648'),
-        ('TRANSFERENCIA', '648'),
-        ('PAGAMENTO', '648'),
-        ('TARIFA BANCARIA', '650'),
-        ('RENDIMENTO', '651')
-    ]
-    cursor.executemany("""
-        INSERT INTO tipos_operacao (descricao, codigo_reduzido)
-        VALUES (?, ?)
-    """, operacoes_iniciais)
-
-    conn.commit()
-    conn.close()
-
-    print(f"Banco de dados recriado e populado com sucesso em: {db_path}")
-
-if __name__ == "__main__":
-    main()
