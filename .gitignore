@@ -1,15 +1,26 @@
-# Ambientes virtuais e motores Python port�teis
+# Ambientes virtuais e motores Python portáteis
 venv/
 .venv/
 env/
 python_engine/
 
-# Compilados, execut�veis e bibliotecas compiladas
+# Pastas de compilação e ficheiros temporários
+build/
+dist/
+.vscode/
+
+# Bases de dados SQLite
+*.db
+*.db-shm
+*.db-wal
+
+# Compilados, executáveis e bibliotecas compiladas
 *.exe
 *.dll
 *.so
 *.pyd
 *.zip
+*.spec
 
 # Caches do Python
 __pycache__/
