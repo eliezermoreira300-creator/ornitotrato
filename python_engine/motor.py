@@ -5,12 +5,6 @@ import re
 import shutil
 import sqlite3
 import sys
-import time
-
-try:
-    import pandas as pd  # type: ignore
-except ImportError:
-    pd = None
 
 try:
     import pdfplumber  # type: ignore
@@ -29,32 +23,36 @@ except ImportError:
     fitz = None
 
 try:
-    import easyocr  # type: ignore
-    import numpy as np
-    import PIL.Image
+    import pandas as pd  # type: ignore
 except ImportError:
-    easyocr = None
+    pd = None
+
+
+def obter_base_dir():
+    """Retorna o diretório base absoluto correto, seja rodando como script ou .exe compilado."""
+    if getattr(sys, 'frozen', False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
 
 
 class MotorUniversalExtratos:
 
     def __init__(self, db_path=None):
-        self.db_path = Path(db_path) if db_path else Path(r"C:\Users\Usuário\Documents\orninto\ornitotrato.db")
-        self._leitor_easyocr = None
-
-    def _obter_easyocr(self):
-        if self._leitor_easyocr is None and easyocr:
-            pasta_cache = Path.home() / ".ornitotrato" / "modelos_ocr"
-            pasta_cache.mkdir(parents=True, exist_ok=True)
-            self._leitor_easyocr = easyocr.Reader(["pt"], gpu=False, model_storage_directory=str(pasta_cache))
-        return self._leitor_easyocr
+        if db_path:
+            self.db_path = Path(db_path)
+        else:
+            base_dir = obter_base_dir()
+            # Garante que aponta sempre para o ornitotrato.db na raiz do projeto / junto ao .exe
+            self.db_path = base_dir / "ornitotrato.db"
 
     def _conectar_db(self):
         if self.db_path.exists():
             try:
                 return sqlite3.connect(str(self.db_path))
-            except Exception:
+            except Exception as e:
+                print(f"[AVISO] Erro ao conectar ao banco de dados: {e}")
                 return None
+        print(f"[AVISO] Banco de dados não encontrado em: {self.db_path}")
         return None
 
     def _identificar_empresa_e_conta(self, texto_completo: str, agencia_extrato: str, numero_conta_extrato: str):
@@ -64,61 +62,39 @@ class MotorUniversalExtratos:
 
         try:
             cursor = conn.cursor()
-            cursor.execute("SELECT id, cnpj, razao_social FROM empresas")
-            empresas = cursor.fetchall()
-            cnpj_encontrado = None
-
-            texto_limpo_geral = re.sub(r"[^0-9]", "", texto_completo or "")
-            for _, cnpj_db, _ in empresas:
-                cnpj_nums = re.sub(r"[^0-9]", "", str(cnpj_db))
-                if cnpj_nums and cnpj_nums in texto_limpo_geral:
-                    cnpj_encontrado = str(cnpj_db)
-                    break
-
-            query = "SELECT agencia, numero_conta, conta_reduzida, cnpj_empresa FROM bancos_contas"
-            params = ()
-            if cnpj_encontrado:
-                query += " WHERE cnpj_empresa = ?"
-                params = (cnpj_encontrado,)
-
-            cursor.execute(query, params)
+            cursor.execute("SELECT agencia, numero_conta, conta_reduzida, cnpj_empresa FROM bancos_contas")
             contas = cursor.fetchall()
 
             if not contas:
-                cursor.execute("SELECT agencia, numero_conta, conta_reduzida, cnpj_empresa FROM bancos_contas")
-                contas = cursor.fetchall()
+                return None, "2"
 
+            texto_limpo_geral = re.sub(r"[^0-9]", "", texto_completo or "")
             agencia_nums = re.sub(r"[^0-9]", "", agencia_extrato or "")
             conta_nums = re.sub(r"[^0-9]", "", numero_conta_extrato or "")
 
             melhor_match = None
-            cnpj_vinculado = cnpj_encontrado
+            cnpj_vinculado = None
 
             for ag_db, num_db, reduzida, cnpj_emp in contas:
                 ag_db_nums = re.sub(r"[^0-9]", "", str(ag_db or ""))
                 num_db_nums = re.sub(r"[^0-9]", "", str(num_db or ""))
 
-                conta_exata = conta_nums and num_db_nums and (conta_nums == num_db_nums)
-                conta_parcial = conta_nums and num_db_nums and (conta_nums in num_db_nums or num_db_nums in conta_nums)
-                agencia_compativel = not agencia_nums or not ag_db_nums or (agencia_nums in ag_db_nums or ag_db_nums in agencia_nums)
-
-                if conta_exata and agencia_compativel:
-                    return cnpj_emp, str(reduzida)
-                elif conta_exata:
-                    melhor_match = str(reduzida)
-                    cnpj_vinculado = cnpj_emp
-                elif conta_parcial and agencia_compativel and not melhor_match:
-                    melhor_match = str(reduzida)
-                    cnpj_vinculado = cnpj_emp
+                if num_db_nums and (num_db_nums in conta_nums or num_db_nums in texto_limpo_geral or num_db_nums == conta_nums):
+                    agencia_compativel = not ag_db_nums or not agencia_nums or (ag_db_nums in agencia_nums or agencia_nums in ag_db_nums or ag_db_nums in texto_limpo_geral)
+                    
+                    if agencia_compativel:
+                        return str(cnpj_emp), str(reduzida)
+                    elif not melhor_match:
+                        melhor_match = str(reduzida)
+                        cnpj_vinculado = str(cnpj_emp)
 
             if melhor_match:
                 return cnpj_vinculado, melhor_match
 
-            if contas:
-                return contas[0][3], str(contas[0][2])
+            return str(contas[0][3]), str(contas[0][2])
 
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[ERRO] Falha ao identificar empresa e conta: {e}")
         finally:
             conn.close()
 
@@ -131,75 +107,34 @@ class MotorUniversalExtratos:
 
         try:
             cursor = conn.cursor()
-            hist_upper = historico.upper()
-
-            # 1. Busca todas as regras de tipos_operacao ordenadas pela descrição mais longa primeiro
-            cursor.execute(
-                """
-                SELECT codigo_reduzido, descricao 
-                FROM tipos_operacao 
-                WHERE descricao IS NOT NULL AND TRIM(descricao) != ''
-                ORDER BY LENGTH(descricao) DESC
-            """
-            )
+            cursor.execute("SELECT codigo_reduzido, descricao FROM tipos_operacao WHERE descricao IS NOT NULL ORDER BY LENGTH(descricao) DESC")
             regras = cursor.fetchall()
 
-            # 2. Avalia cada regra exigindo que TODAS as palavras da descrição estejam presentes no histórico
+            hist_upper = historico.upper()
+
             for codigo_reduzido, desc_regra in regras:
-                # Divide a descrição cadastrada em palavras individuais (ex: "PIX ENVIADO" viria ['PIX', 'ENVIADO'])
-                palavras_regra = [p.upper() for p in re.findall(r"\b[A-Za-zÀ-ÿ0-9]+\b", str(desc_regra))]
-                
-                if not palavras_regra:
+                if not desc_regra:
                     continue
-
-                # Verifica se absolutamente todas as palavras obrigatórias da regra constam no histórico do extrato
-                todas_presentes = all(re.search(r'\b' + re.escape(p) + r'\b', hist_upper) for p in palavras_regra)
-
-                if todas_presentes:
+                desc_limpa = str(desc_regra).strip().upper()
+                if desc_limpa in hist_upper:
                     return str(codigo_reduzido)
 
-            # 3. Fallback inteligente caso nenhuma regra composta feche 100%
-            palavras_hist = re.findall(r"\b[A-Za-zÀ-ÿ]{2,}\b", hist_upper)
-            if len(palavras_hist) >= 2:
-                for i in range(len(palavras_hist) - 1):
-                    dupla = f"{palavras_hist[i]} {palavras_hist[i+1]}"
-                    cursor.execute(
-                        """
-                            SELECT codigo_reduzido 
-                            FROM tipos_operacao 
-                            WHERE ? LIKE '%' || descricao || '%' OR descricao LIKE '%' || ? || '%'
-                            ORDER BY LENGTH(descricao) DESC
-                            LIMIT 1
-                        """,
-                        (dupla, dupla),
-                    )
-                    res_dupla = cursor.fetchone()
-                    if res_dupla:
-                        return str(res_dupla[0])
-
-            for palavra in sorted(palavras_hist, key=len, reverse=True):
-                if len(palavra) < 3:
+            for codigo_reduzido, desc_regra in regras:
+                if not desc_regra:
                     continue
-                cursor.execute(
-                    """
-                        SELECT codigo_reduzido 
-                        FROM tipos_operacao 
-                        WHERE ? LIKE '%' || descricao || '%'
-                        ORDER BY LENGTH(descricao) DESC
-                        LIMIT 1
-                    """,
-                    (palavra,),
-                )
-                res_palavra = cursor.fetchone()
-                if res_palavra:
-                    return str(res_palavra[0])
+                desc_limpa = str(desc_regra).strip().upper()
+                palavras_regra = [p for p in re.findall(r"\b[A-Za-zÀ-ÿ0-9]{3,}\b", desc_limpa)]
+                
+                if palavras_regra:
+                    if all(palavra in hist_upper for palavra in palavras_regra):
+                        return str(codigo_reduzido)
 
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[AVISO] Erro ao buscar conta reduzida: {e}")
         finally:
             conn.close()
 
-        return "648" if tipo_transacao == "D" else "649"
+        return "968" if tipo_transacao == "D" else "59"
 
     def _adicionar_transacao(self, transacoes, data, historico, valor_float, agencia, numero_conta, texto_completo=""):
         historico = historico.replace("?", "").strip()
@@ -247,7 +182,6 @@ class MotorUniversalExtratos:
                     conteudo_ofx = f.read()
 
                 transacoes_lidas = False
-                
                 if OfxParser:
                     try:
                         ofx = OfxParser.parse(StringIO(conteudo_ofx))
@@ -269,7 +203,7 @@ class MotorUniversalExtratos:
                                     texto += f"{data} {historico} {trans.amount}\n"
                                     self._adicionar_transacao(
                                         transacoes, data, historico, float(trans.amount), 
-                                        agencia_detectada, conta_detectada, texto_completo=historico
+                                        agencia_detectada, conta_detectada, texto_completo=texto
                                     )
                                     transacoes_lidas = True
                     except Exception:
@@ -277,13 +211,9 @@ class MotorUniversalExtratos:
 
                 if not transacoes_lidas:
                     padrao_bloco = re.findall(r"<STMTTRN>(.*?)</STMTTRN>", conteudo_ofx, re.DOTALL | re.IGNORECASE)
-                    if not padrao_bloco:
-                        padrao_bloco = conteudo_ofx.split("<STMTTRN>")
-
                     for bloco in padrao_bloco:
                         if not bloco.strip():
                             continue
-                        
                         match_data = re.search(r"<DT(?:POSTED|AVAIL)>(\d{8})", bloco, re.IGNORECASE)
                         data_str = "01/01/2026"
                         if match_data:
@@ -314,18 +244,16 @@ class MotorUniversalExtratos:
 
                         historico = historico.replace("?", "").strip()
                         texto += f"{data_str} {historico} {val_float}\n"
-
                         self._adicionar_transacao(
                             transacoes, data_str, historico, val_float, 
-                            agencia_detectada, conta_detectada, texto_completo=historico
+                            agencia_detectada, conta_detectada, texto_completo=texto
                         )
-
             except Exception as e:
                 raise ValueError(f"Falha ao interpretar arquivo OFX: {e}")
 
         elif extensao in [".xlsx", ".xls"]:
             if not pd:
-                raise ValueError("Biblioteca pandas não está instalada para ler planilhas Excel.")
+                raise ValueError("Biblioteca pandas não está instalada.")
             try:
                 xls = pd.ExcelFile(str(caminho_arquivo))
                 texto_acumulado = []
@@ -337,7 +265,6 @@ class MotorUniversalExtratos:
                         celulas = [str(c).strip() for c in row.values if c is not None and str(c).strip() != "" and str(c).strip().lower() != "nan"]
                         if not celulas:
                             continue
-
                         linha_unida = " ".join(celulas)
                         texto_acumulado.append(linha_unida)
 
@@ -354,16 +281,7 @@ class MotorUniversalExtratos:
 
                         if matches_val:
                             val_str = matches_val[-1].group(1)
-                            if "," in val_str and "." in val_str:
-                                if val_str.find(".") < val_str.find(","):
-                                    val_padrao = val_str.replace(".", "").replace(",", ".")
-                                else:
-                                    val_padrao = val_str.replace(",", "")
-                            elif "," in val_str:
-                                val_padrao = val_str.replace(".", "").replace(",", ".")
-                            else:
-                                val_padrao = val_str
-
+                            val_padrao = val_str.replace(".", "").replace(",", ".") if "," in val_str else val_str
                             try:
                                 val_float = float(val_padrao)
                             except ValueError:
@@ -372,90 +290,15 @@ class MotorUniversalExtratos:
                             hist_limpo = linha_unida
                             if data_bruta:
                                 hist_limpo = hist_limpo.replace(data_bruta, "")
-                            hist_limpo = hist_limpo.replace(matches_val[-1].group(1), "")
-                            hist_limpo = re.sub(r"[,;\|]+", " ", hist_limpo).strip()
-                            historico = hist_limpo if hist_limpo else "LANCAMENTO EXCEL"
-
+                            hist_limpo = hist_limpo.replace(matches_val[-1].group(1), "").strip()
+                            
                             self._adicionar_transacao(
-                                transacoes, data_util, historico, val_float,
-                                agencia_detectada, conta_detectada, texto_completo=linha_unida
+                                transacoes, data_util, hist_limpo, val_float,
+                                agencia_detectada, conta_detectada, texto_completo="\n".join(texto_acumulado)
                             )
-
                 texto = "\n".join(texto_acumulado)
-
             except Exception as e:
-                raise ValueError(f"Falha ao ler planilha Excel: {e}")
-
-        elif extensao == ".csv":
-            try:
-                with open(caminho_arquivo, "r", encoding="utf-8", errors="ignore") as f:
-                    conteudo_csv = f.read()
-
-                amostra = conteudo_csv[:2048]
-                try:
-                    dialecto = csv.Sniffer().sniff(amostra, delimiters=";,\\t")
-                    delimitador = dialecto.delimiter
-                except Exception:
-                    delimitador = ";" if ";" in conteudo_csv else ","
-
-                ultima_data_csv = "01/01/2026"
-                linhas = list(csv.reader(conteudo_csv.splitlines(), delimiter=delimitador))
-
-                for linha in linhas:
-                    linha_unida_str = ",".join(linha)
-                    matches_val = list(re.finditer(r"(-?[\d\.]+,\d{2})", linha_unida_str))
-                    if not matches_val:
-                        matches_val = list(re.finditer(r"(-?[\d]+\.\d{2})", linha_unida_str))
-
-                    val_float = 0.0
-                    encontrou_valor = False
-                    
-                    if matches_val:
-                        match_v = matches_val[-1]
-                        val_str = match_v.group(1)
-                        if "," in val_str and "." in val_str:
-                            if val_str.find(".") < val_str.find(","):
-                                val_padrao = val_str.replace(".", "").replace(",", ".")
-                            else:
-                                val_padrao = val_str.replace(",", "")
-                        elif "," in val_str:
-                            val_padrao = val_str.replace(".", "").replace(",", ".")
-                        else:
-                            val_padrao = val_str
-
-                        try:
-                            val_float = float(val_padrao)
-                            encontrou_valor = True
-                        except ValueError:
-                            pass
-
-                    match_d = re.search(r"\b(\d{2}/\d{2}(?:/\d{4})?)\b", linha_unida_str)
-                    data_bruta = ""
-                    if match_d:
-                        data_bruta = match_d.group(1)
-                        ultima_data_csv = data_bruta
-                    
-                    data_utilizada = data_bruta if data_bruta else ultima_data_csv
-
-                    hist_limpo = linha_unida_str
-                    if data_bruta:
-                        hist_limpo = hist_limpo.replace(data_bruta, "")
-                    if encontrou_valor and matches_val:
-                        hist_limpo = hist_limpo.replace(matches_val[-1].group(1), "")
-
-                    hist_limpo = re.sub(r"[,;]+", " ", hist_limpo)
-                    historico = hist_limpo.replace("?", "").strip()
-                    if not historico:
-                        historico = "LANCAMENTO CSV"
-
-                    if encontrou_valor:
-                        self._adicionar_transacao(
-                            transacoes, data_utilizada, historico, val_float, 
-                            agencia_detectada, conta_detectada, texto_completo=conteudo_csv
-                        )
-
-            except Exception as e:
-                raise ValueError(f"Falha ao ler CSV: {e}")
+                raise ValueError(f"Falha ao ler Excel: {e}")
 
         elif extensao in [".pdf", ".png", ".jpg", ".jpeg"]:
             tabelas_extraidas = []
@@ -468,8 +311,6 @@ class MotorUniversalExtratos:
                             t_tabelas = pagina.extract_tables()
                             if t_tabelas:
                                 tabelas_extraidas.extend(t_tabelas)
-                            if not t or len(t.strip()) < 10:
-                                t = "\n".join(item["text"] for item in pagina.extract_words() if "text" in item)
                             if t:
                                 paginas_texto.append(t)
                         if paginas_texto:
@@ -480,35 +321,10 @@ class MotorUniversalExtratos:
             if not texto.strip() and fitz:
                 try:
                     doc = fitz.open(str(caminho_arquivo))
-                    texto_fitz = []
-                    for pagina in doc:
-                        t = pagina.get_text("text")
-                        if t:
-                            texto_fitz.append(t)
-                    if texto_fitz:
-                        texto = "\n".join(texto_fitz)
+                    texto_fitz = [pagina.get_text("text") for pagina in doc]
+                    texto = "\n".join(texto_fitz)
                 except Exception:
                     pass
-
-            if not texto.strip() and fitz and easyocr:
-                reader = self._obter_easyocr()
-                if reader:
-                    try:
-                        doc = fitz.open(str(caminho_arquivo))
-                        texto_ocr = []
-                        for pagina in doc:
-                            pix = pagina.get_pixmap(dpi=200)
-                            img = PIL.Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                            resultados = reader.readtext(np.array(img), detail=0, paragraph=True)
-                            if resultados:
-                                texto_ocr.extend(resultados)
-                        if texto_ocr:
-                            texto = "\n".join(texto_ocr)
-                    except Exception:
-                        pass
-
-            if not texto.strip() and not tabelas_extraidas:
-                raise ValueError("O arquivo não contém texto legível ou falhou na extração/OCR.")
 
             if tabelas_extraidas:
                 ultima_data_bloco = "01/01/2026"
@@ -516,14 +332,12 @@ class MotorUniversalExtratos:
                     for linha in tabela:
                         if not linha or all(not str(c).strip() for c in linha):
                             continue
-                        
-                        primeira_celula = str(linha[0]).strip() if len(linha) > 0 and linha[0] is not None else ""
+                        primeira_celula = str(linha[0]).strip() if linha[0] is not None else ""
                         match_data = re.search(r"\b(\d{2}/\d{2}(?:/\d{4})?)\b", primeira_celula)
                         if match_data:
                             ultima_data_bloco = match_data.group(1)
 
                         texto_linha_unido = " ".join([str(c).strip() for c in linha if c is not None and str(c).strip() != ""])
-                        
                         match_val = re.search(r"(-?[\d\.]*,\d{2})\s*([CD]|\b)?", texto_linha_unido)
                         if match_val:
                             val_str = match_val.group(1)
@@ -533,7 +347,7 @@ class MotorUniversalExtratos:
                             except ValueError:
                                 continue
 
-                            if "D" in sufixo.upper() or "-" in val_str or "DEB" in texto_linha_unido.upper():
+                            if "D" in sufixo.upper() or "-" in val_str:
                                 val_float = -abs(val_float)
 
                             self._adicionar_transacao(
@@ -542,11 +356,7 @@ class MotorUniversalExtratos:
                             )
 
             texto_limpo = re.sub(r"[^\w\s\/\.,\-\:\(\)]", " ", texto)
-            
-            padrao_universal = re.compile(
-                r"(?:(\d{2}/\d{2}(?:/\d{4})?)\s+)?(.*?)\s+(-?[\d\.]*,\d{2})\s*([CD]|\b)?", 
-                re.IGNORECASE
-            )
+            padrao_universal = re.compile(r"(?:(\d{2}/\d{2}(?:/\d{4})?)\s+)?(.*?)\s+(-?[\d\.]*,\d{2})\s*([CD]|\b)?", re.IGNORECASE)
 
             ultima_data_corrida = "01/01/2026"
             historico_acumulado = []
@@ -555,13 +365,11 @@ class MotorUniversalExtratos:
                 linha = linha.strip()
                 if not linha:
                     continue
-                
                 match = padrao_universal.search(linha)
                 if match:
                     data_encontrada = match.group(1)
                     if data_encontrada:
                         ultima_data_corrida = data_encontrada
-                    
                     data = ultima_data_corrida
 
                     val_str = match.group(3)
@@ -570,25 +378,18 @@ class MotorUniversalExtratos:
                     hist_bruto = " ".join(historico_acumulado + [linha])
                     if data_encontrada:
                         hist_bruto = hist_bruto.replace(data_encontrada, "", 1)
-                    hist_bruto = hist_bruto.replace(val_str, "", 1)
-                    if sufixo:
-                        hist_bruto = hist_bruto.replace(sufixo, "", 1)
-
-                    hist_limpo = re.sub(r"(?:R\s*\$)?\s*-?[\d\.]*,\d{2}\s*[CD]?", "", hist_bruto)
-                    hist_limpo = re.sub(r"\b\d{2}:\d{2}(?::\d{2})?\b", "", hist_limpo)
-                    hist_limpo = re.sub(r"[\?\!\#\$\%\*\+\=\[\]\{\}\|\\<>~^]", "", hist_limpo).strip()
-                    hist_limpo = re.sub(r"\s{2,}", " ", hist_limpo) or "LANCAMENTO BANCARIO"
+                    hist_bruto = hist_bruto.replace(val_str, "", 1).strip()
 
                     try:
                         val_float = float(val_str.replace(".", "").replace(",", "."))
                     except ValueError:
                         val_float = 0.0
 
-                    if "D" in sufixo.upper() or val_float < 0 or "DEB" in hist_bruto.upper() or "-" in val_str:
+                    if "D" in sufixo.upper() or val_float < 0 or "-" in val_str:
                         val_float = -abs(val_float)
 
                     self._adicionar_transacao(
-                        transacoes, data, hist_limpo, val_float, 
+                        transacoes, data, hist_bruto, val_float, 
                         agencia_detectada, conta_detectada, texto_completo=texto
                     )
                     historico_acumulado = []
@@ -609,7 +410,6 @@ class MotorUniversalExtratos:
 
 def gerar_linha_colunada_contabil(t) -> str:
     historico_limpo = str(t.get("historico", "")).replace("?", "").strip()
-    
     data_str = str(t.get("data", ""))[:10].ljust(10)
     conta_deb = str(t.get("conta_debito", ""))[:8].ljust(8)
     conta_cred = str(t.get("conta_credito", ""))[:8].ljust(8)
@@ -620,9 +420,13 @@ def gerar_linha_colunada_contabil(t) -> str:
 
 
 def processar_arquivo_isolado(nome_arquivo):
-    pasta_input = Path.home() / "Desktop" / "extratos"
-    pasta_processados = pasta_input / "processados"
-    pasta_erros = pasta_input / "erros"
+    base_dir = obter_base_dir()
+    
+    # Estrutura centralizada na pasta 'extratos' gerenciada ao lado do executável
+    pasta_extratos = base_dir / "extratos"
+    pasta_input = pasta_extratos
+    pasta_processados = pasta_extratos / "processados"
+    pasta_erros = pasta_extratos / "erros"
 
     pasta_processados.mkdir(parents=True, exist_ok=True)
     pasta_erros.mkdir(parents=True, exist_ok=True)
@@ -644,64 +448,19 @@ def processar_arquivo_isolado(nome_arquivo):
         if stdout_destino.exists():
             stdout_destino.unlink()
         shutil.move(str(caixa), str(stdout_destino))
-        print(f"Sucesso: {nome_arquivo} processado com sucesso! ({len(resultado['transacoes'])} lançamentos importados - Empresa CNPJ: {resultado.get('cnpj_empresa')})")
+        print(f"Sucesso: {nome_arquivo} processado! ({len(resultado['transacoes'])} lançamentos - CNPJ: {resultado.get('cnpj_empresa')})")
 
     except Exception as e:
         print(f"Erro ao processar {nome_arquivo}: {e}")
-        try:
-            destino_erro = pasta_erros / caixa.name
-            if destino_erro.exists():
-                destino_erro.unlink()
-            if caixa.exists():
-                shutil.move(str(caixa), str(destino_erro))
-
-            caminho_log = pasta_erros / f"{caixa.stem}_erro.log"
-            with open(caminho_log, "w", encoding="utf-8") as log_f:
-                log_f.write(f"Erro no processamento:\n{str(e)}\n")
-        except Exception as move_err:
-            print(f"Não foi possível mover para a pasta de erros: {move_err}")
-
-
-def monitorar_pasta_alimentacao():
-    """Monitora a pasta de alimentação, processa os arquivos encontrados e os move para 'processados'."""
-    pasta_alimentacao = Path(r"C:\Users\Usuário\Desktop\extratos\analistas")
-    pasta_processados = pasta_alimentacao / "processados"
-    
-    pasta_processados.mkdir(parents=True, exist_ok=True)
-    
-    if not pasta_alimentacao.exists():
-        print(f"Pasta de alimentação não encontrada: {pasta_alimentacao}")
-        return
-
-    arquivos_encontrados = [f for f in pasta_alimentacao.iterdir() if f.is_file()]
-    if not arquivos_encontrados:
-        print(f"Nenhum arquivo encontrado na pasta de alimentação: {pasta_alimentacao}")
-        return
-
-    motor = MotorUniversalExtratos()
-    for arquivo in arquivos_encontrados:
-        print(f"Processando arquivo da pasta de alimentação: {arquivo.name}")
-        try:
-            resultado = motor.processar_arquivo(arquivo)
-            
-            pasta_geral_processados = Path.home() / "Desktop" / "extratos" / "processados"
-            pasta_geral_processados.mkdir(parents=True, exist_ok=True)
-            caminho_txt = pasta_geral_processados / arquivo.with_suffix(".txt").name
-            with open(caminho_txt, "w", encoding="latin-1", errors="replace", newline="") as f:
-                for t in resultado["transacoes"]:
-                    f.write(gerar_linha_colunada_contabil(t) + "\r\n")
-
-            destino = pasta_processados / arquivo.name
-            if destino.exists():
-                destino.unlink()
-            shutil.move(str(arquivo), str(destino))
-            print(f"Sucesso: {arquivo.name} alimentado no banco e movido para {pasta_processados}")
-        except Exception as e:
-            print(f"Erro ao processar o arquivo {arquivo.name}: {e}")
+        caminho_erro = pasta_erros / caixa.name
+        if caixa.exists():
+            if caminho_erro.exists():
+                caminho_erro.unlink()
+            shutil.move(str(caixa), str(caminho_erro))
 
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         processar_arquivo_isolado(sys.argv[1])
     else:
-        monitorar_pasta_alimentacao()
+        print("Motor pronto para execução via daemon principal.")

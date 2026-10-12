@@ -1,67 +1,63 @@
+-- Active: 1791034753856@@127.0.0.1@3306
 import sqlite3
-from pathlib import Path
+import os
 
-# Define o caminho absoluto para o banco na pasta orninto
-db_path = Path(r"C:\Users\Usuário\Documents\orninto\ornitotrato.db")
+def criar_banco_definitivo():
+    nome_banco = "ornitotrato.db"
+    
+    # Remove o banco antigo para garantir uma estrutura limpa
+    if os.path.exists(nome_banco):
+        try:
+            os.remove(nome_banco)
+            print("Banco de dados antigo removido.")
+        except PermissionError:
+            print("[ERRO] O arquivo do banco está aberto no editor. Feche as abas no VS Code e tente novamente.")
+            return
 
-# Garante que a pasta existe
-db_path.parent.mkdir(parents=True, exist_ok=True)
+    conexao = sqlite3.connect(nome_banco)
+    cursor = conexao.cursor()
+    
+    # Ativa chaves estrangeiras e modo WAL
+    cursor.execute("PRAGMA foreign_keys = ON;")
+    cursor.execute("PRAGMA journal_mode = WAL;")
 
-conn = sqlite3.connect(db_path)
-cursor = conn.cursor()
+    # 1. Tabela Empresas (CNPJ é a Chave Primária)
+    cursor.execute("""
+        CREATE TABLE empresas (
+            cnpj TEXT PRIMARY KEY,
+            razao_social TEXT NOT NULL
+        );
+    """)
 
-# 1. Criação da tabela de Bancos e Contas
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS bancos_contas (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    agencia TEXT NOT NULL,
-    numero_conta TEXT NOT NULL,
-    descricao_conta TEXT,
-    conta_reduzida TEXT NOT NULL
-);
-""")
+    # 2. Tabela Bancos e Contas (Relacionada com empresas via cnpj_empresa)
+    cursor.execute("""
+        CREATE TABLE bancos_contas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            agencia TEXT NOT NULL,
+            numero_conta TEXT NOT NULL,
+            descricao_conta TEXT,
+            conta_reduzida TEXT NOT NULL,
+            cnpj_empresa TEXT NOT NULL,
+            FOREIGN KEY (cnpj_empresa) REFERENCES empresas(cnpj) ON DELETE CASCADE
+        );
+    """)
 
-# 2. Criação da tabela de Tipos de Operação / Históricos
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS tipos_operacao (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    descricao TEXT NOT NULL,
-    codigo_reduzido TEXT NOT NULL
-);
-""")
+    # 3. Tabela Tipos de Operação (De-para global de histórico/descrição para código reduzido)
+    cursor.execute("""
+        CREATE TABLE tipos_operacao (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            descricao TEXT NOT NULL,
+            codigo_reduzido TEXT NOT NULL
+        );
+    """)
 
-# Limpa dados antigos caso o ficheiro já tivesse algo parcial
-cursor.execute("DELETE FROM bancos_contas;")
-cursor.execute("DELETE FROM tipos_operacao;")
+    # Índices de performance para as buscas do motor em Go
+    cursor.execute("CREATE INDEX idx_bancos_contas_cnpj ON bancos_contas(cnpj_empresa);")
+    cursor.execute("CREATE INDEX idx_tipos_operacao_desc ON tipos_operacao(descricao);")
 
-# 3. Inserção das Contas Bancárias Oficiais do Projeto
-bancos_iniciais = [
-    ('2591-7', '48073-8', 'Conta Banco 1', '6'),
-    ('3224-7', '4.516-0', 'Conta Banco 2', '8'),
-    ('3214-0', '120.308-8', 'Conta Banco 3', '3')
-]
-cursor.executemany("""
-    INSERT INTO bancos_contas (agencia, numero_conta, descricao_conta, conta_reduzida)
-    VALUES (?, ?, ?, ?)
-""", bancos_iniciais)
+    conexao.commit()
+    conexao.close()
+    print("Banco de dados criado com sucesso, seguindo o modelo contábil exato!")
 
-# 4. Inserção de Palavras-Chaves de Históricos e Reduzidas
-operacoes_iniciais = [
-    ('PIX RECEBIDO', '649'),
-    ('PIX ENVIADO', '648'),
-    ('TED', '648'),
-    ('DOC', '648'),
-    ('TRANSFERENCIA', '648'),
-    ('PAGAMENTO', '648'),
-    ('TARIFA BANCARIA', '650'),
-    ('RENDIMENTO', '651')
-]
-cursor.executemany("""
-    INSERT INTO tipos_operacao (descricao, codigo_reduzido)
-    VALUES (?, ?)
-""", operacoes_iniciais)
-
-conn.commit()
-conn.close()
-
-print("Banco de dados recriado e populado com sucesso na pasta orninto!")
+if __name__ == "__main__":
+    criar_banco_definitivo()

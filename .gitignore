@@ -1,10 +1,17 @@
-ï»¿ornitotrato.exe
-*.exe
-ornito.teste/
-extratos/
-cadastros/
-__pycache__/
+# Ambientes virtuais e motores Python portáteis
 venv/
+.venv/
+env/
+python_engine/
+
+# Compilados, executáveis e bibliotecas compiladas
+*.exe
+*.dll
+*.so
+*.pyd
+*.zip
+
+# Caches do Python
+__pycache__/
 *.pyc
-.DS_Store
-Thumbs.db
+*.pyo
