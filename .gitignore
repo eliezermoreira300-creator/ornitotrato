@@ -9,7 +9,7 @@ build/
 dist/
 .vscode/
 
-# Bases de dados SQLite
+# Bases de dados SQLite e ficheiros WAL/SHM
 *.db
 *.db-shm
 *.db-wal
@@ -21,6 +21,12 @@ dist/
 *.pyd
 *.zip
 *.spec
+
+# Pastas de dados locais e extratos
+extratos/
+input_cadastros/
+input_extratos/
+output_txt/
 
 # Caches do Python
 __pycache__/
